@@ -101,16 +101,22 @@ function steerAac() {
   const a = mse.audio, b = a.buffered;
   if (!b.length || !mse.started) return;
   const end = b.end(b.length - 1);
-  // A burst or a stall left too much queued: jump forward to [target] from the end.
-  if (end - a.currentTime > target + 0.12) {
+  const ahead = end - a.currentTime;
+  if (ahead > target + 0.5) {
+    // Far behind (a stall): jump forward to [target] from the end.
     a.currentTime = end - target;
     mse.seeks++;
+  } else {
+    // A little behind: play 3% fast until it's caught up. Jumping instead, even by a little, made
+    // the player hold back more each time, and every jump is a skip in the sound.
+    const rate = ahead > target + 0.03 ? 1.03 : 1.0;
+    if (a.playbackRate !== rate) a.playbackRate = rate;
   }
   // Keep the buffer from growing without end.
   if (!mse.sb.updating && b.start(0) < a.currentTime - 20) {
     try { mse.sb.remove(0, a.currentTime - 10); } catch (e) {}
   }
-  report({ mode: 'aac', ahead: end - a.currentTime, waiting: mse.waiting, seeks: mse.seeks, rs: a.readyState });
+  report({ mode: 'aac', ahead: end - a.currentTime, waiting: mse.waiting, seeks: mse.seeks, rs: a.readyState, rate: a.playbackRate });
 }
 
 // Each message: 8-byte little-endian float64 (the sender's clock, ms), then 16-bit PCM, interleaved.
