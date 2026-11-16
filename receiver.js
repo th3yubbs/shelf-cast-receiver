@@ -55,6 +55,9 @@ function connect(url) {
 // AAC mode (no Web Audio on Cast speakers): ADTS frames fed to the device's own player through
 // Media Source Extensions, keeping only [target] seconds queued ahead of what's playing.
 let mse = null;          // { audio, ms, sb, queue, waiting, seeks }
+const MIMES = ['audio/aac', 'audio/webm; codecs="opus"', 'audio/mp4; codecs="opus"', 'audio/mp4; codecs="mp4a.40.2"', 'audio/mp4; codecs="flac"'];
+let mime = 'audio/aac';
+let steering = true;
 function startAac() {
   const audio = document.createElement('audio');
   const ms = new MediaSource();
@@ -63,7 +66,7 @@ function startAac() {
   audio.addEventListener('error', () => fail('player error ' + (audio.error ? audio.error.code : '?')));
   ms.addEventListener('sourceopen', () => {
     try {
-      mse.sb = ms.addSourceBuffer('audio/aac');
+      mse.sb = ms.addSourceBuffer(mime);
       mse.sb.mode = 'sequence';
       mse.sb.addEventListener('updateend', pump);
     } catch (e) { fail('sourcebuffer: ' + e.message); }
@@ -102,7 +105,9 @@ function steerAac() {
   if (!b.length || !mse.started) return;
   const end = b.end(b.length - 1);
   const ahead = end - a.currentTime;
-  if (ahead > target + 0.5) {
+  if (!steering) {
+    // Left alone, to see what the player does by itself.
+  } else if (ahead > target + 0.5) {
     // Far behind (a stall): jump forward to [target] from the end.
     a.currentTime = end - target;
     mse.seeks++;
@@ -116,7 +121,7 @@ function steerAac() {
   if (!mse.sb.updating && b.start(0) < a.currentTime - 20) {
     try { mse.sb.remove(0, a.currentTime - 10); } catch (e) {}
   }
-  report({ mode: 'aac', ahead: end - a.currentTime, waiting: mse.waiting, seeks: mse.seeks, rs: a.readyState, rate: a.playbackRate });
+  report({ mode: 'aac', ahead: end - a.currentTime, waiting: mse.waiting, seeks: mse.seeks, rs: a.readyState, rate: a.playbackRate, ct: a.currentTime, now: performance.now() / 1000 });
 }
 
 // Each message: 8-byte little-endian float64 (the sender's clock, ms), then 16-bit PCM, interleaved.
@@ -156,7 +161,10 @@ context.addCustomMessageListener(NS, (event) => {
     channels = m.channels === 1 ? 1 : 2;
     target = typeof m.target === 'number' && m.target >= 0.02 && m.target <= 2 ? m.target : 0.1;
     stats = { chunks: 0, underruns: 0, errors: [] };
-    if (m.mode === 'aac') {
+    if (m.mode === 'aac' || m.mode === 'mse') {
+      mime = MIMES.includes(m.mime) ? m.mime : 'audio/aac';
+      steering = m.steer !== false;
+      if (mse) { try { mse.audio.remove(); } catch (e) {} mse = null; }
       try { startAac(); } catch (e) { fail('aac: ' + e.message); return; }
     } else {
       try {
