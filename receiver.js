@@ -97,6 +97,19 @@ context.addCustomMessageListener(NS, (event) => {
     connect(m.url);
   } else if (m.type === 'target') {
     if (typeof m.target === 'number' && m.target >= 0.02 && m.target <= 2) target = m.target;
+  } else if (m.type === 'caps') {
+    // What this device can play with: Web Audio, and Media Source Extensions with which formats.
+    const ms = typeof MediaSource !== 'undefined';
+    const types = ['audio/webm; codecs="opus"', 'audio/webm; codecs="pcm"', 'audio/mp4; codecs="mp4a.40.2"',
+      'audio/mp4; codecs="opus"', 'audio/mp4; codecs="flac"', 'audio/mpeg', 'audio/aac'];
+    const supported = ms ? types.filter((t) => { try { return MediaSource.isTypeSupported(t); } catch (e) { return false; } }) : [];
+    report({ event: 'caps', caps: {
+      AudioContext: typeof AudioContext, webkitAudioContext: typeof webkitAudioContext,
+      MediaSource: ms, ManagedMediaSource: typeof ManagedMediaSource !== 'undefined',
+      Audio: typeof Audio, WebSocket: typeof WebSocket, WebTransport: typeof WebTransport,
+      RTCPeerConnection: typeof RTCPeerConnection, msTypes: supported,
+      ua: String(navigator.userAgent).slice(0, 160),
+    } });
   } else if (m.type === 'ping') {
     report({ event: 'pong', echo: typeof m.t === 'number' ? m.t : 0 });
   }
