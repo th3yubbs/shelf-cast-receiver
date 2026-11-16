@@ -49,7 +49,68 @@ function connect(url) {
   ws.onopen = () => report({ event: 'open' });
   ws.onerror = () => fail('websocket error');
   ws.onclose = (e) => report({ event: 'close', code: e.code });
-  ws.onmessage = (e) => { if (e.data instanceof ArrayBuffer) play(e.data); };
+  ws.onmessage = (e) => { if (e.data instanceof ArrayBuffer) (mse ? playAac(e.data) : play(e.data)); };
+}
+
+// AAC mode (no Web Audio on Cast speakers): ADTS frames fed to the device's own player through
+// Media Source Extensions, keeping only [target] seconds queued ahead of what's playing.
+let mse = null;          // { audio, ms, sb, queue, waiting, seeks }
+function startAac() {
+  const audio = document.createElement('audio');
+  const ms = new MediaSource();
+  mse = { audio: audio, ms: ms, sb: null, queue: [], waiting: 0, seeks: 0, started: false };
+  audio.addEventListener('waiting', () => { if (mse) mse.waiting++; });
+  audio.addEventListener('error', () => fail('player error ' + (audio.error ? audio.error.code : '?')));
+  ms.addEventListener('sourceopen', () => {
+    try {
+      mse.sb = ms.addSourceBuffer('audio/aac');
+      mse.sb.mode = 'sequence';
+      mse.sb.addEventListener('updateend', pump);
+    } catch (e) { fail('sourcebuffer: ' + e.message); }
+  });
+  audio.src = URL.createObjectURL(ms);
+  document.body.appendChild(audio);
+}
+function pump() {
+  if (!mse || !mse.sb || mse.sb.updating || mse.queue.length === 0) return;
+  const n = mse.queue.reduce((a, b) => a + b.byteLength, 0);
+  const all = new Uint8Array(n);
+  let o = 0;
+  for (const b of mse.queue) { all.set(new Uint8Array(b), o); o += b.byteLength; }
+  mse.queue = [];
+  try { mse.sb.appendBuffer(all); } catch (e) { fail('append: ' + e.message); }
+}
+function aheadAac() {
+  if (!mse || !mse.sb) return 0;
+  const b = mse.audio.buffered;
+  return b.length ? b.end(b.length - 1) - mse.audio.currentTime : 0;
+}
+function playAac(buf) {
+  if (!mse || buf.byteLength < 9) return;
+  lastTs = new DataView(buf).getFloat64(0, true);
+  mse.queue.push(buf.slice(8));
+  pump();
+  stats.chunks++;
+  if (!mse.started && aheadAac() >= target) {
+    mse.started = true;
+    mse.audio.play().catch((e) => fail('play: ' + e.message));
+  }
+  if (stats.chunks % 12 === 0) steerAac();
+}
+function steerAac() {
+  const a = mse.audio, b = a.buffered;
+  if (!b.length || !mse.started) return;
+  const end = b.end(b.length - 1);
+  // A burst or a stall left too much queued: jump forward to [target] from the end.
+  if (end - a.currentTime > target + 0.12) {
+    a.currentTime = end - target;
+    mse.seeks++;
+  }
+  // Keep the buffer from growing without end.
+  if (!mse.sb.updating && b.start(0) < a.currentTime - 20) {
+    try { mse.sb.remove(0, a.currentTime - 10); } catch (e) {}
+  }
+  report({ mode: 'aac', ahead: end - a.currentTime, waiting: mse.waiting, seeks: mse.seeks, rs: a.readyState });
 }
 
 // Each message: 8-byte little-endian float64 (the sender's clock, ms), then 16-bit PCM, interleaved.
@@ -88,12 +149,16 @@ context.addCustomMessageListener(NS, (event) => {
     rate = [16000, 22050, 24000, 32000, 44100, 48000].includes(m.rate) ? m.rate : 48000;
     channels = m.channels === 1 ? 1 : 2;
     target = typeof m.target === 'number' && m.target >= 0.02 && m.target <= 2 ? m.target : 0.1;
-    try {
-      if (!ctx) ctx = new AudioContext({ sampleRate: rate, latencyHint: 'interactive' });
-      if (ctx.state !== 'running') ctx.resume();
-    } catch (e) { fail('audio: ' + e.message); return; }
-    nextTime = 0;
     stats = { chunks: 0, underruns: 0, errors: [] };
+    if (m.mode === 'aac') {
+      try { startAac(); } catch (e) { fail('aac: ' + e.message); return; }
+    } else {
+      try {
+        if (!ctx) ctx = new AudioContext({ sampleRate: rate, latencyHint: 'interactive' });
+        if (ctx.state !== 'running') ctx.resume();
+      } catch (e) { fail('audio: ' + e.message); return; }
+      nextTime = 0;
+    }
     connect(m.url);
   } else if (m.type === 'target') {
     if (typeof m.target === 'number' && m.target >= 0.02 && m.target <= 2) target = m.target;
